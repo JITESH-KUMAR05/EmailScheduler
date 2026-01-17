@@ -6,10 +6,19 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Redis connection config for the worker
+const redisHost = process.env.REDIS_HOST || 'localhost';
+const redisPassword = process.env.REDIS_PASSWORD;
+const isProduction = redisHost !== 'localhost';
+
 const redisConnection = {
-  host: process.env.REDIS_HOST || 'localhost',
+  host: redisHost,
   port: Number(process.env.REDIS_PORT) || 6379,
-  ...(process.env.REDIS_PASSWORD && { password: process.env.REDIS_PASSWORD }),
+  ...(redisPassword && { password: redisPassword }),
+  ...(isProduction && { 
+    tls: {
+      rejectUnauthorized: false
+    } 
+  }),
 };
 
 // Create SMTP transporter

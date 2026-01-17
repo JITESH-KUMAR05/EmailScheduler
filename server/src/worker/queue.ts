@@ -1,12 +1,22 @@
 import { Queue } from 'bullmq';
+import dotenv from 'dotenv';
 
+dotenv.config();
+
+const redisHost = process.env.REDIS_HOST || 'localhost';
 const redisPassword = process.env.REDIS_PASSWORD;
+const isProduction = redisHost !== 'localhost';
 
 export const emailQueue = new Queue('email-queue', {
   connection: {
-    host: process.env.REDIS_HOST || 'localhost',
+    host: redisHost,
     port: Number(process.env.REDIS_PORT) || 6379,
     ...(redisPassword && { password: redisPassword }),
+    ...(isProduction && { 
+        tls: {
+            rejectUnauthorized: false
+        } 
+    }),
   },
   defaultJobOptions: {
     attempts: 3,
