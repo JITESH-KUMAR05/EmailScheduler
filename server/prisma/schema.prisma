@@ -1,0 +1,41 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Main email table
+model ScheduledEmail {
+  id        Int      @id @default(autoincrement())
+  email     String
+  subject   String
+  body      String   @db.Text
+  status    String   @default("PENDING")
+  sendAt    DateTime
+  sentAt    DateTime?
+  
+  batchId   String?
+  sender    String   @default("default")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([status])
+  @@index([sendAt])
+  @@index([batchId])
+  @@index([sender])
+}
+
+model RateLimit {
+  id           Int      @id @default(autoincrement())
+  sender       String
+  hourWindow   String
+  emailCount   Int      @default(0)
+  createdAt    DateTime @default(now())
+  
+  @@unique([sender, hourWindow])
+  @@index([hourWindow])
+}
