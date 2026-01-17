@@ -131,7 +131,7 @@ Production-grade email scheduling system built with TypeScript, Express.js, Bull
 
 ### 1. Clone Repository
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/JITESH-KUMAR05/EmailScheduler.git
 cd ReachInboxAssignment
 ```
 
@@ -351,17 +351,7 @@ MIN_DELAY_BETWEEN_EMAILS=2       # Seconds between each send
 
 ---
 
-## 🎬 Demo Video
 
-[Link to demo video showing]:
-1. Login with Google OAuth
-2. Compose email with CSV upload
-3. Schedule emails with custom settings
-4. View scheduled emails table
-5. Server restart → Jobs still process
-6. View sent emails with Ethereal preview
-
----
 
 ## 📝 Assumptions & Trade-offs
 
@@ -378,27 +368,11 @@ MIN_DELAY_BETWEEN_EMAILS=2       # Seconds between each send
 
 ---
 
-## 🚢 Deployment
-
-### Production Checklist
-- [ ] Change `NODE_ENV=production`
-- [ ] Use managed PostgreSQL (AWS RDS, Supabase, etc.)
-- [ ] Use managed Redis (AWS ElastiCache, Upstash, etc.)
-- [ ] Add proper error tracking (Sentry)
-- [ ] Setup CI/CD pipeline
-- [ ] Add rate limiting on API routes
-- [ ] Setup monitoring (Prometheus/Grafana)
-
----
 
 ## 👨‍💻 Author
 
 **Jitesh Kumar**
-- GitHub: [@your-username]
-- Email: your.email@example.com
+- GitHub: https://github.com/JITESH-KUMAR05/
+- Email: jiteshtechwork@gmail.com
 
 ---
-
-## 📄 License
-
-MIT License - See LICENSE file for details
