@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { prisma } from './config/db'; // ✅ Changed from pool
+import { prisma } from './config/db'; 
 import { redisConnection } from './config/redis';
 import apiRoutes from './routes/apiRoutes';
 
