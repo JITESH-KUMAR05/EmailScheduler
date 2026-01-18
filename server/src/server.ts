@@ -14,7 +14,7 @@ app.use(cors({
   origin: [
     "http://localhost:3000",
     "http://localhost:3001", 
-    "https://email-scheduler-red.vercel.app/" 
+    "https://email-scheduler-red.vercel.app" 
   ],
   credentials: true
 }));
