@@ -36,7 +36,7 @@ app.listen(PORT, () => {
 
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
-  await prisma.$disconnect(); // ✅ Changed from pool.end()
+  await prisma.$disconnect(); 
   await redisConnection.quit();
   process.exit(0);
 });
