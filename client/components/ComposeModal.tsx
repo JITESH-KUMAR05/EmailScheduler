@@ -25,7 +25,7 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
   const [attachments, setAttachments] = useState<File[]>([]); // New State for files
   
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const attachmentInputRef = useRef<HTMLInputElement>(null); // Ref for paperclip
+  const attachmentInputRef = useRef<HTMLInputElement>(null); 
 
   const handleEmailKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ',') {
@@ -83,17 +83,19 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
       };
 
       await emailAPI.scheduleEmails(payload);
-      alert('Campaign Scheduled Successfully!');
       
-      // Reset first
+      // Reset form
       setSubject('');
       setBody('');
       setEmailList([]);
       setAttachments([]);
       
-      // Close modal
       onClose();
-      await onSuccess();
+      
+      setTimeout(async () => {
+        await onSuccess(); // This calls fetchData()
+        alert('Campaign Scheduled Successfully!');
+      }, 500);
       
     } catch (error) {
       console.error(error);

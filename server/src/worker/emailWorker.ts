@@ -123,7 +123,7 @@ const worker = new Worker<EmailJob>(
         },
       });
 
-      console.log(`📊 Database updated: Email ${emailId} status = ${updatedEmail.status}`);
+      console.log(`📊 DB CONFIRM: Email ${emailId} → Status: ${updatedEmail.status}, SentAt: ${updatedEmail.sentAt}`);
 
       return { success: true, messageId: info.messageId };
     } catch (error) {
