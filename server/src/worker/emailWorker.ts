@@ -115,13 +115,15 @@ const worker = new Worker<EmailJob>(
       console.log(`🔗 Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
 
       // Update database
-      await prisma.scheduledEmail.update({
+      const updatedEmail = await prisma.scheduledEmail.update({
         where: { id: emailId },
         data: {
           status: 'SENT',
           sentAt: new Date(),
         },
       });
+
+      console.log(`📊 Database updated: Email ${emailId} status = ${updatedEmail.status}`);
 
       return { success: true, messageId: info.messageId };
     } catch (error) {

@@ -84,14 +84,17 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
 
       await emailAPI.scheduleEmails(payload);
       alert('Campaign Scheduled Successfully!');
-      onSuccess();
-      onClose();
       
-      // Reset
+      // Reset first
       setSubject('');
       setBody('');
       setEmailList([]);
       setAttachments([]);
+      
+      // Close modal
+      onClose();
+      await onSuccess();
+      
     } catch (error) {
       console.error(error);
       alert('Failed to schedule.');

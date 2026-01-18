@@ -94,6 +94,12 @@ export const getScheduledEmails = async (_req: Request, res: Response): Promise<
       where: { status: 'PENDING' },
       orderBy: { sendAt: 'asc' },
     });
+    
+    // Add cache headers to prevent caching
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     res.json(emails);
   } catch (error) {
     console.error('❌ Error fetching scheduled emails:', error);
@@ -109,6 +115,12 @@ export const getSentEmails = async (_req: Request, res: Response): Promise<void>
       },
       orderBy: { sentAt: 'desc' },
     });
+    
+    // Add cache headers
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     res.json(emails);
   } catch (error) {
     console.error('❌ Error fetching sent emails:', error);

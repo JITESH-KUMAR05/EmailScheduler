@@ -7,6 +7,7 @@ export const api = axios.create({
   baseURL: API_URL,
   headers: {
     'Content-Type': 'application/json',
+    'Cache-Control': 'no-cache', // <-- Disable cache
   },
 });
 
@@ -15,8 +16,12 @@ export const emailAPI = {
     api.post<ScheduleEmailResponse>('/api/emails/schedule', data),
   
   getScheduledEmails: () =>
-    api.get<Email[]>('/api/emails/scheduled'),
+    api.get<Email[]>('/api/emails/scheduled', {
+      headers: { 'Cache-Control': 'no-cache' } 
+    }),
   
   getSentEmails: () =>
-    api.get<Email[]>('/api/emails/sent'),
+    api.get<Email[]>('/api/emails/sent', {
+      headers: { 'Cache-Control': 'no-cache' } 
+    }),
 };
