@@ -2,24 +2,33 @@ import { Worker, Job } from 'bullmq';
 import { prisma } from '../config/db';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import Redis from 'ioredis';
+import { emailQueue } from './queue';
 
 dotenv.config();
 
 // Redis connection config for the worker
 const redisHost = process.env.REDIS_HOST || 'localhost';
+const redisPort = Number(process.env.REDIS_PORT) || 6379;
 const redisPassword = process.env.REDIS_PASSWORD;
-const isProduction = redisHost !== 'localhost';
+// Set REDIS_TLS=true when using Azure Cache for Redis (port 6380)
+const redisTLS = process.env.REDIS_TLS === 'true';
 
-const redisConnection = {
+// Build connection config conditionally
+const redisConnection: any = {
   host: redisHost,
-  port: Number(process.env.REDIS_PORT) || 6379,
-  ...(redisPassword && { password: redisPassword }),
-  ...(isProduction && { 
-    tls: {
-      rejectUnauthorized: false
-    } 
-  }),
+  port: redisPort,
 };
+
+// Only add password if it exists (not needed for local Docker Redis)
+if (redisPassword) {
+  redisConnection.password = redisPassword;
+}
+
+// Enable TLS for Azure Cache for Redis
+if (redisTLS) {
+  redisConnection.tls = { rejectUnauthorized: false };
+}
 
 // Create SMTP transporter
 const transporter = nodemailer.createTransport({
@@ -79,6 +88,99 @@ async function checkRateLimit(sender: string): Promise<boolean> {
   return rateLimit.emailCount <= maxEmailsPerHour;
 }
 
+// 🆕 UPDATED: Clean up stale jobs + Re-queue expired PENDING emails
+async function cleanupStaleJobs() {
+  try {
+    const redis = new Redis(redisConnection);
+    
+    // Get all job IDs from the queue
+    const waitingJobs = await redis.lrange('bull:email-queue:wait', 0, -1);
+    const delayedJobs = await redis.zrange('bull:email-queue:delayed', 0, -1);
+    const activeJobs = await redis.lrange('bull:email-queue:active', 0, -1);
+    
+    const allJobIds = [...waitingJobs, ...delayedJobs, ...activeJobs];
+    
+    console.log(`🔍 Found ${allJobIds.length} jobs in Redis queue`);
+    
+    // Check which emails exist in database with PENDING status
+    const pendingEmails = await prisma.scheduledEmail.findMany({
+      where: { status: 'PENDING' },
+      select: { id: true, sendAt: true, email: true, subject: true, body: true, sender: true },
+    });
+    
+    const validEmailIds = new Set(pendingEmails.map(e => e.id));
+    
+    console.log(`📊 Found ${validEmailIds.size} pending emails in database`);
+    
+    // Remove jobs for emails that don't exist or aren't pending anymore
+    let staleCount = 0;
+    for (const jobId of allJobIds) {
+      const emailId = parseInt(jobId.replace('email-', ''));
+      
+      if (!validEmailIds.has(emailId)) {
+        console.log(`🗑️ Removing stale job: ${jobId}`);
+        await redis.del(`bull:email-queue:${jobId}`);
+        staleCount++;
+      }
+    }
+    
+    if (staleCount > 0) {
+      console.log(`✅ Cleaned ${staleCount} stale jobs from queue`);
+    }
+    
+    // 🆕 Find expired emails (time has passed but still PENDING)
+    const now = new Date();
+    const expiredEmails = pendingEmails.filter(e => e.sendAt < now);
+    
+    if (expiredEmails.length > 0) {
+      console.log(`⏰ Found ${expiredEmails.length} expired pending emails - re-queuing them now`);
+      
+      for (const email of expiredEmails) {
+        // Check if job already exists in queue
+        const jobId = `email-${email.id}`;
+        const existingJob = await emailQueue.getJob(jobId);
+        
+        if (!existingJob) {
+          // Add to queue with no delay (send immediately)
+          await emailQueue.add(
+            'send-email',
+            {
+              emailId: email.id,
+              email: email.email,
+              subject: email.subject,
+              body: email.body,
+              sender: email.sender,
+            },
+            {
+              delay: 0, // Send immediately
+              jobId: jobId,
+              priority: 1, // Higher priority than future emails
+            }
+          );
+          console.log(`📨 Re-queued expired email ${email.id} to ${email.email}`);
+        }
+      }
+    }
+    
+    await redis.quit();
+    console.log('✅ Cleanup completed');
+  } catch (error) {
+    console.error('❌ Cleanup failed:', error);
+  }
+}
+
+// Test database connection
+prisma.$connect()
+  .then(async () => {
+    console.log('✅ Connected to PostgreSQL database');
+    // Run cleanup after connecting to database
+    await cleanupStaleJobs();
+  })
+  .catch((err: Error) => {
+    console.error('❌ Failed to connect to database:', err);
+    process.exit(1);
+  });
+
 // Create the worker
 const worker = new Worker<EmailJob>(
   'email-queue',
@@ -88,13 +190,26 @@ const worker = new Worker<EmailJob>(
     console.log(`📧 [Job ${job.id}] Processing email to: ${email}`);
 
     try {
+      // Check if email still exists and is pending
+      const emailRecord = await prisma.scheduledEmail.findUnique({
+        where: { id: emailId },
+      });
+      
+      if (!emailRecord) {
+        console.log(`⚠️ [Job ${job.id}] Email ${emailId} not found in database, skipping`);
+        return { success: false, reason: 'EMAIL_NOT_FOUND' };
+      }
+      
+      if (emailRecord.status !== 'PENDING') {
+        console.log(`⚠️ [Job ${job.id}] Email ${emailId} already processed (${emailRecord.status}), skipping`);
+        return { success: false, reason: 'ALREADY_PROCESSED' };
+      }
+
       // Check rate limit
       const canSend = await checkRateLimit(sender);
 
       if (!canSend) {
         console.log(`⏸️ [Job ${job.id}] Rate limit reached for ${sender}. Delaying...`);
-        
-        // Reschedule for next hour - BullMQ will retry with backoff
         throw new Error('RATE_LIMIT_EXCEEDED');
       }
 
@@ -129,7 +244,6 @@ const worker = new Worker<EmailJob>(
     } catch (error) {
       console.error(`❌ [Job ${job.id}] Failed to send email:`, error);
 
-      // Update database with failure
       await prisma.scheduledEmail.update({
         where: { id: emailId },
         data: {
@@ -137,7 +251,7 @@ const worker = new Worker<EmailJob>(
         },
       });
 
-      throw error; // BullMQ will retry based on job options
+      throw error;
     }
   },
   {
@@ -163,18 +277,55 @@ worker.on('error', (err) => {
   console.error('❌ Worker error:', err);
 });
 
-// Test database connection
-prisma.$connect()
-  .then(() => {
-    console.log('✅ Connected to PostgreSQL database');
-  })
-  .catch((err: Error) => {
-    console.error('❌ Failed to connect to database:', err);
-    process.exit(1);
-  });
+// 🆕 Periodically check for expired emails every 2 minutes
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const expiredEmails = await prisma.scheduledEmail.findMany({
+      where: {
+        status: 'PENDING',
+        sendAt: {
+          lt: now,
+        },
+      },
+      select: { id: true, email: true, subject: true, body: true, sender: true },
+    });
+
+    if (expiredEmails.length > 0) {
+      console.log(`⏰ Periodic check: Found ${expiredEmails.length} expired emails to send`);
+      
+      for (const email of expiredEmails) {
+        const jobId = `email-${email.id}`;
+        const existingJob = await emailQueue.getJob(jobId);
+        
+        if (!existingJob) {
+          await emailQueue.add(
+            'send-email',
+            {
+              emailId: email.id,
+              email: email.email,
+              subject: email.subject,
+              body: email.body,
+              sender: email.sender,
+            },
+            {
+              delay: 0,
+              jobId: jobId,
+              priority: 1,
+            }
+          );
+          console.log(`📨 Re-queued expired email ${email.id}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ Periodic check failed:', error);
+  }
+}, 2 * 60 * 1000); // Every 2 minutes
 
 console.log('🚀 Email Worker Started...');
 console.log(`⚙️ Concurrency: ${process.env.WORKER_CONCURRENCY || 5}`);
 console.log(`⏱️ Min delay: ${process.env.MIN_DELAY_BETWEEN_EMAILS || 2}s`);
 console.log(`📊 Rate limit: ${process.env.MAX_EMAILS_PER_HOUR || 200} emails/hour`);
+console.log('⏰ Periodic expired email check: Every 2 minutes');
 console.log('📬 Waiting for jobs...');

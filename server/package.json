@@ -5,8 +5,11 @@
   "scripts": {
     "dev": "nodemon src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "concurrently \"node dist/server.js\" \"node dist/worker/emailWorker.js\"",
+    "start:server": "node dist/server.js",
+    "start:worker": "node dist/worker/emailWorker.js",
     "worker": "ts-node src/worker/emailWorker.ts",
+    "postinstall": "prisma generate",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -16,6 +19,7 @@
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "bullmq": "^5.66.5",
+    "concurrently": "^9.2.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

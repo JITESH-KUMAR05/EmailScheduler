@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-package-lock.json
+# NOTE: package-lock.json must be committed for "npm ci" to work in CI/CD
 
 # Environment variables
 .env
