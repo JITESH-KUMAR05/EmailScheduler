@@ -256,6 +256,7 @@ const worker = new Worker<EmailJob>(
   },
   {
     connection: redisConnection,
+    prefix: '{bull}', // Required for Redis cluster mode (Azure Managed Redis)
     concurrency: Number(process.env.WORKER_CONCURRENCY) || 5,
     limiter: {
       max: Number(process.env.MAX_EMAILS_PER_HOUR) || 200,

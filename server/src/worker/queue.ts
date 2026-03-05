@@ -27,6 +27,7 @@ if (redisTLS) {
 
 export const emailQueue = new Queue('email-queue', {
   connection: connectionConfig,
+  prefix: '{bull}', // Required for Redis cluster mode (Azure Managed Redis)
   defaultJobOptions: {
     attempts: 3,
     backoff: {
