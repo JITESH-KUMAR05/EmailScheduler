@@ -84,7 +84,8 @@ export const scheduleEmails = async (req: Request, res: Response): Promise<void>
     });
   } catch (error) {
     console.error('❌ Error scheduling emails:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: 'Internal server error', detail: message });
   }
 };
 
