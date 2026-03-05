@@ -1,0 +1,19 @@
+name: Keep Backend Alive
+
+on:
+  schedule:
+    # Runs every 14 minutes to prevent Azure App Service cold starts
+    - cron: '*/14 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          echo "Pinging backend..."
+          curl -s -o /dev/null -w "HTTP Status: %{http_code}" \
+            https://reachinbox-api-d2fqguanfghycrhu.canadacentral-01.azurewebsites.net/health
+          echo ""
+          echo "Ping complete."
