@@ -1,7 +1,12 @@
 import axios from 'axios';
 import { Email, ScheduleEmailRequest, ScheduleEmailResponse } from '@/types';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+// Auto-upgrade http → https when running on a secure origin (prevents Mixed Content errors)
+const rawUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const API_URL =
+  typeof window !== 'undefined' && window.location.protocol === 'https:'
+    ? rawUrl.replace(/^http:\/\//, 'https://')
+    : rawUrl;
 
 export const api = axios.create({
   baseURL: API_URL,
