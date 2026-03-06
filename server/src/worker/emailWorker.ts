@@ -1,35 +1,11 @@
-import { Worker, Job } from 'bullmq';
 import { prisma } from '../config/db';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
-import { emailQueue } from './queue';
 
 dotenv.config();
 
-// Redis connection config for the worker
-const redisHost = process.env.REDIS_HOST || 'localhost';
-const redisPort = Number(process.env.REDIS_PORT) || 6379;
-const redisPassword = process.env.REDIS_PASSWORD;
-// Set REDIS_TLS=true when using Azure Cache for Redis (port 6380)
-const redisTLS = process.env.REDIS_TLS === 'true';
+// ─── SMTP transporter ────────────────────────────────────────────────────────
 
-// Build connection config conditionally
-const redisConnection: any = {
-  host: redisHost,
-  port: redisPort,
-};
-
-// Only add password if it exists (not needed for local Docker Redis)
-if (redisPassword) {
-  redisConnection.password = redisPassword;
-}
-
-// Enable TLS for Azure Cache for Redis
-if (redisTLS) {
-  redisConnection.tls = { rejectUnauthorized: false };
-}
-
-// Create SMTP transporter
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT),
@@ -40,7 +16,6 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Verify SMTP connection
 transporter.verify((error) => {
   if (error) {
     console.error('❌ SMTP connection failed:', error);
@@ -49,247 +24,147 @@ transporter.verify((error) => {
   }
 });
 
-interface EmailJob {
-  emailId: number;
+// ─── Rate limiting (DB-backed) ────────────────────────────────────────────────
+
+async function checkRateLimit(sender: string): Promise<boolean> {
+  const now = new Date();
+  const hourWindow = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}-${String(now.getUTCHours()).padStart(2, '0')}`;
+  const maxPerHour = Number(process.env.MAX_EMAILS_PER_HOUR) || 200;
+
+  const record = await prisma.rateLimit.upsert({
+    where: { sender_hourWindow: { sender, hourWindow } },
+    create: { sender, hourWindow, emailCount: 1 },
+    update: { emailCount: { increment: 1 } },
+  });
+
+  return record.emailCount <= maxPerHour;
+}
+
+// ─── Core send function ───────────────────────────────────────────────────────
+
+async function sendEmailRecord(emailRecord: {
+  id: number;
   email: string;
   subject: string;
   body: string;
   sender: string;
-}
+}): Promise<void> {
+  console.log(`📧 Sending email ${emailRecord.id} → ${emailRecord.email}`);
 
-// Rate limiting helper
-async function checkRateLimit(sender: string): Promise<boolean> {
-  const now = new Date();
-  const hourWindow = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}`;
+  const canSend = await checkRateLimit(emailRecord.sender);
+  if (!canSend) {
+    console.warn(`⏸️ Rate limit reached for sender "${emailRecord.sender}", resetting email ${emailRecord.id} to PENDING`);
+    await prisma.scheduledEmail.update({
+      where: { id: emailRecord.id },
+      data: { status: 'PENDING' },
+    });
+    return;
+  }
 
-  const maxEmailsPerHour = Number(process.env.MAX_EMAILS_PER_HOUR) || 200;
-
-  // Get or create rate limit record
-  const rateLimit = await prisma.rateLimit.upsert({
-    where: {
-      sender_hourWindow: {
-        sender,
-        hourWindow,
-      },
-    },
-    create: {
-      sender,
-      hourWindow,
-      emailCount: 1,
-    },
-    update: {
-      emailCount: {
-        increment: 1,
-      },
-    },
+  const info = await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: emailRecord.email,
+    subject: emailRecord.subject,
+    text: emailRecord.body,
+    html: `<p>${emailRecord.body}</p>`,
   });
 
-  return rateLimit.emailCount <= maxEmailsPerHour;
+  console.log(`✅ Email ${emailRecord.id} sent — messageId: ${info.messageId}`);
+  const previewUrl = nodemailer.getTestMessageUrl(info);
+  if (previewUrl) {
+    console.log(`🔗 Preview: ${previewUrl}`);
+  }
+
+  await prisma.scheduledEmail.update({
+    where: { id: emailRecord.id },
+    data: { status: 'SENT', sentAt: new Date() },
+  });
+
+  console.log(`📊 DB updated: email ${emailRecord.id} → SENT`);
 }
 
-// Re-queue any PENDING emails whose sendAt time has already passed
-async function requeueExpiredEmails() {
+// ─── Poll loop ────────────────────────────────────────────────────────────────
+
+let processing = false;
+
+async function processDueEmails(): Promise<void> {
+  if (processing) return;
+  processing = true;
+
   try {
     const now = new Date();
-    const expiredEmails = await prisma.scheduledEmail.findMany({
-      where: {
-        status: 'PENDING',
-        sendAt: { lt: now },
-      },
-      select: { id: true, email: true, subject: true, body: true, sender: true },
+
+    const due = await prisma.scheduledEmail.findMany({
+      where: { status: 'PENDING', sendAt: { lte: now } },
+      orderBy: { sendAt: 'asc' },
+      take: 10,
     });
 
-    if (expiredEmails.length === 0) {
-      console.log('✅ No expired pending emails found');
+    if (due.length === 0) {
+      processing = false;
       return;
     }
 
-    console.log(`⏰ Found ${expiredEmails.length} expired pending emails — re-queuing now`);
+    console.log(`⏰ Poll: ${due.length} email(s) due for sending`);
 
-    for (const emailRecord of expiredEmails) {
-      const jobId = `email-${emailRecord.id}`;
-      const existingJob = await emailQueue.getJob(jobId);
+    // Mark as PROCESSING to prevent double-send on concurrent restarts
+    await prisma.scheduledEmail.updateMany({
+      where: { id: { in: due.map(e => e.id) }, status: 'PENDING' },
+      data: { status: 'PROCESSING' },
+    });
 
-      if (!existingJob) {
-        await emailQueue.add(
-          'send-email',
-          {
-            emailId: emailRecord.id,
-            email: emailRecord.email,
-            subject: emailRecord.subject,
-            body: emailRecord.body,
-            sender: emailRecord.sender,
-          },
-          { delay: 0, jobId, priority: 1 }
-        );
-        console.log(`📨 Re-queued expired email ${emailRecord.id} → ${emailRecord.email}`);
-      } else {
-        console.log(`⏭️ Job ${jobId} already exists in queue, skipping`);
+    const minDelay = Number(process.env.MIN_DELAY_BETWEEN_EMAILS) || 2;
+
+    for (const emailRecord of due) {
+      try {
+        await sendEmailRecord(emailRecord);
+        if (minDelay > 0) {
+          await new Promise(resolve => setTimeout(resolve, minDelay * 1000));
+        }
+      } catch (err) {
+        console.error(`❌ Failed to send email ${emailRecord.id}:`, err);
+        await prisma.scheduledEmail.update({
+          where: { id: emailRecord.id },
+          data: { status: 'FAILED' },
+        });
       }
     }
-  } catch (error) {
-    console.error('❌ requeueExpiredEmails failed:', error);
+  } catch (err) {
+    console.error('❌ processDueEmails error:', err);
+  } finally {
+    processing = false;
   }
 }
 
-// Test database connection
+// ─── Crash recovery: reset stuck PROCESSING emails ───────────────────────────
+
+async function recoverStuckProcessing(): Promise<void> {
+  const stuckCutoff = new Date(Date.now() - 5 * 60 * 1000);
+  const stuck = await prisma.scheduledEmail.updateMany({
+    where: { status: 'PROCESSING', updatedAt: { lt: stuckCutoff } },
+    data: { status: 'PENDING' },
+  });
+  if (stuck.count > 0) {
+    console.log(`♻️ Recovered ${stuck.count} stuck PROCESSING email(s) → PENDING`);
+  }
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+
+const POLL_INTERVAL_MS = 10_000;
+
 prisma.$connect()
   .then(async () => {
-    console.log('✅ Connected to PostgreSQL database');
-    // Immediately re-queue any PENDING emails whose time has already passed
-    await requeueExpiredEmails();
+    console.log('✅ Worker connected to PostgreSQL');
+    await recoverStuckProcessing();
+    await processDueEmails(); // run immediately on startup
+    setInterval(processDueEmails, POLL_INTERVAL_MS);
+    setInterval(recoverStuckProcessing, 5 * 60 * 1000);
+    console.log(`🚀 Email Worker started — polling every ${POLL_INTERVAL_MS / 1000}s`);
   })
   .catch((err: Error) => {
-    console.error('❌ Failed to connect to database:', err);
+    console.error('❌ Worker failed to connect to DB:', err);
     process.exit(1);
   });
 
-// Create the worker
-const worker = new Worker<EmailJob>(
-  'email-queue',
-  async (job: Job<EmailJob>) => {
-    const { emailId, email, subject, body, sender } = job.data;
 
-    console.log(`📧 [Job ${job.id}] Processing email to: ${email}`);
-
-    try {
-      // Check if email still exists and is pending
-      const emailRecord = await prisma.scheduledEmail.findUnique({
-        where: { id: emailId },
-      });
-      
-      if (!emailRecord) {
-        console.log(`⚠️ [Job ${job.id}] Email ${emailId} not found in database, skipping`);
-        return { success: false, reason: 'EMAIL_NOT_FOUND' };
-      }
-      
-      if (emailRecord.status !== 'PENDING') {
-        console.log(`⚠️ [Job ${job.id}] Email ${emailId} already processed (${emailRecord.status}), skipping`);
-        return { success: false, reason: 'ALREADY_PROCESSED' };
-      }
-
-      // Check rate limit
-      const canSend = await checkRateLimit(sender);
-
-      if (!canSend) {
-        console.log(`⏸️ [Job ${job.id}] Rate limit reached for ${sender}. Delaying...`);
-        throw new Error('RATE_LIMIT_EXCEEDED');
-      }
-
-      // Add minimum delay between emails
-      const minDelay = Number(process.env.MIN_DELAY_BETWEEN_EMAILS) || 2;
-      await new Promise(resolve => setTimeout(resolve, minDelay * 1000));
-
-      // Send email via Ethereal
-      const info = await transporter.sendMail({
-        from: process.env.SMTP_FROM,
-        to: email,
-        subject: subject,
-        text: body,
-        html: `<p>${body}</p>`,
-      });
-
-      console.log(`✅ [Job ${job.id}] Email sent: ${info.messageId}`);
-      console.log(`🔗 Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
-
-      // Update database
-      const updatedEmail = await prisma.scheduledEmail.update({
-        where: { id: emailId },
-        data: {
-          status: 'SENT',
-          sentAt: new Date(),
-        },
-      });
-
-      console.log(`📊 DB CONFIRM: Email ${emailId} → Status: ${updatedEmail.status}, SentAt: ${updatedEmail.sentAt}`);
-
-      return { success: true, messageId: info.messageId };
-    } catch (error) {
-      console.error(`❌ [Job ${job.id}] Failed to send email:`, error);
-
-      await prisma.scheduledEmail.update({
-        where: { id: emailId },
-        data: {
-          status: 'FAILED',
-        },
-      });
-
-      throw error;
-    }
-  },
-  {
-    connection: redisConnection,
-    prefix: '{bull}', // Required for Redis cluster mode (Azure Managed Redis)
-    concurrency: Number(process.env.WORKER_CONCURRENCY) || 5,
-    limiter: {
-      max: Number(process.env.MAX_EMAILS_PER_HOUR) || 200,
-      duration: 3600000, // 1 hour
-    },
-  }
-);
-
-// Worker event handlers
-worker.on('completed', (job) => {
-  console.log(`✅ Job ${job.id} completed successfully`);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`❌ Job ${job?.id} failed:`, err.message);
-});
-
-worker.on('error', (err) => {
-  console.error('❌ Worker error:', err);
-});
-
-// 🆕 Periodically check for expired emails every 2 minutes
-setInterval(async () => {
-  try {
-    const now = new Date();
-    const expiredEmails = await prisma.scheduledEmail.findMany({
-      where: {
-        status: 'PENDING',
-        sendAt: {
-          lt: now,
-        },
-      },
-      select: { id: true, email: true, subject: true, body: true, sender: true },
-    });
-
-    if (expiredEmails.length > 0) {
-      console.log(`⏰ Periodic check: Found ${expiredEmails.length} expired emails to send`);
-      
-      for (const email of expiredEmails) {
-        const jobId = `email-${email.id}`;
-        const existingJob = await emailQueue.getJob(jobId);
-        
-        if (!existingJob) {
-          await emailQueue.add(
-            'send-email',
-            {
-              emailId: email.id,
-              email: email.email,
-              subject: email.subject,
-              body: email.body,
-              sender: email.sender,
-            },
-            {
-              delay: 0,
-              jobId: jobId,
-              priority: 1,
-            }
-          );
-          console.log(`📨 Re-queued expired email ${email.id}`);
-        }
-      }
-    }
-  } catch (error) {
-    console.error('❌ Periodic check failed:', error);
-  }
-}, 2 * 60 * 1000); // Every 2 minutes
-
-console.log('🚀 Email Worker Started...');
-console.log(`⚙️ Concurrency: ${process.env.WORKER_CONCURRENCY || 5}`);
-console.log(`⏱️ Min delay: ${process.env.MIN_DELAY_BETWEEN_EMAILS || 2}s`);
-console.log(`📊 Rate limit: ${process.env.MAX_EMAILS_PER_HOUR || 200} emails/hour`);
-console.log('⏰ Periodic expired email check: Every 2 minutes');
-console.log('📬 Waiting for jobs...');
