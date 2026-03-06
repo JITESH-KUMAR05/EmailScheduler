@@ -127,3 +127,47 @@ export const getSentEmails = async (_req: Request, res: Response): Promise<void>
     res.status(500).json({ error: 'Failed to fetch sent emails' });
   }
 };
+
+export const requeuePending = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const now = new Date();
+    const overdue = await prisma.scheduledEmail.findMany({
+      where: { status: 'PENDING', sendAt: { lt: now } },
+      select: { id: true, email: true, subject: true, body: true, sender: true, sendAt: true },
+    });
+
+    if (overdue.length === 0) {
+      res.json({ message: 'No overdue pending emails found', queued: [] });
+      return;
+    }
+
+    const results: { id: number; email: string; action: string }[] = [];
+
+    for (const record of overdue) {
+      const jobId = `email-${record.id}`;
+      try {
+        const existing = await emailQueue.getJob(jobId);
+        if (existing) {
+          results.push({ id: record.id, email: record.email, action: 'already_in_queue' });
+        } else {
+          await emailQueue.add(
+            'send-email',
+            { emailId: record.id, email: record.email, subject: record.subject, body: record.body, sender: record.sender },
+            { delay: 0, jobId, priority: 1 }
+          );
+          results.push({ id: record.id, email: record.email, action: 'queued' });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push({ id: record.id, email: record.email, action: `error: ${msg}` });
+      }
+    }
+
+    console.log('🔁 Manual requeue results:', results);
+    res.json({ message: `Processed ${overdue.length} overdue email(s)`, queued: results });
+  } catch (error) {
+    console.error('❌ requeuePending error:', error);
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: 'Failed to requeue', detail: msg });
+  }
+};
